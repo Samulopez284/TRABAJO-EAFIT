@@ -78,20 +78,107 @@
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
-const $=id=>document.getElementById(id);let items=[];let busy=false;const publicMode=new URLSearchParams(location.search).get('preview')==='compartir'||!['127.0.0.1','localhost'].includes(location.hostname);if(publicMode){$('runBtn').textContent='Probar escenario actual  →';$('statusText').textContent='Vista compartida · modo de prueba';$('pendientes').textContent='Simulación en navegador · sin API'}
+const $=id=>document.getElementById(id);
+const API='http://127.0.0.1:8080/v1';
+let items=[],busy=false,historyByClient=new Map(),sessionCount=0;
 const fmtMoney=n=>new Intl.NumberFormat('es-CO',{style:'currency',currency:'COP',maximumFractionDigits:0}).format(Number(n||0));
-function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
+function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2800)}
 function setStatus(ok,msg){$('statusDot').className='dot '+(ok?'ok':'err');$('statusText').textContent=msg}
-function metrics(m={},session=0,remaining=null){$('fraude').textContent=m.fraude_detectado_pct==null?'—':m.fraude_detectado_pct+'%';$('fp').textContent=m.falsos_positivos_pct==null?'—':m.falsos_positivos_pct+'%';$('latencia').textContent=m.latencia_ms_p50==null?'—':m.latencia_ms_p50+' ms';$('total').textContent=Number(session||0).toLocaleString('es-CO');$('pendientes').textContent=remaining==null?'Listo para iniciar la simulación':Number(remaining).toLocaleString('es-CO')+' operaciones pendientes'}
-function showReasons(d){if(!d){$('reasons').innerHTML='<div class="reason-empty">Selecciona una operación para ver los motivos.</div>';return}$('reasons').innerHTML=(d.razones||[]).map((r,i)=>`<div class="reason"><div class="reason-mark">${i+1}</div><div><b>${esc(r)}</b><span>Señal considerada por el motor</span></div></div>`).join('')||'<div class="reason-empty">Sin motivos disponibles.</div>'}
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function render(){const body=$('rows');if(!items.length)return;body.innerHTML=items.slice().reverse().map((d,i)=>`<tr data-index="${items.length-1-i}" tabindex="0"><td><span class="txid">${esc(d.id_transaccion)}</span><span class="sub">${esc(d.fecha_hora||'')}</span></td><td>${esc((d.tipo_operacion||'').replaceAll('_',' '))}</td><td>${fmtMoney(d.monto_cop)}</td><td><span class="decision ${d.decision}">${d.decision==='aprobar'?'✓':d.decision==='desafiar'?'◉':'Ⅱ'} ${d.decision}</span></td><td><div class="risk"><span class="bar"><i style="width:${Math.round((d.puntaje||0)*100)}%"></i></span><small>${Math.round((d.puntaje||0)*100)}%</small></div></td></tr>`).join('');body.querySelectorAll('tr').forEach(row=>{row.addEventListener('click',()=>showReasons(items[Number(row.dataset.index)]));row.addEventListener('keydown',e=>{if(e.key==='Enter')showReasons(items[Number(row.dataset.index)])})});$('countBadge').textContent=items.length+' en pantalla';showReasons(items[items.length-1])}
-async function refresh(){if(publicMode){setStatus(true,'Vista compartida · modo de prueba');metrics({},items.length,null);$('pendientes').textContent='Escenario local · sin datos personales';return}try{const r=await fetch('/api/status',{cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||'Sandbox no disponible');setStatus(true,'Sandbox conectado');metrics(d.metricas,d.procesadas_en_sesion,d.metricas.transacciones_pendientes)}catch(e){setStatus(false,'Sandbox desconectado');toast('No se pudo conectar: '+e.message)}}
-async function run(){if(busy)return;busy=true;$('runBtn').disabled=true;$('runBtn').textContent=publicMode?'Calculando riesgo…':'Analizando…';$('runBtn').classList.add('loading');try{if(publicMode){const s=evaluateScenario(true);const n=items.length+1;const d={id_transaccion:'DEMO-'+String(n).padStart(4,'0'),fecha_hora:new Date().toLocaleString('es-CO'),tipo_operacion:'transferencia_inmediata',monto_cop:850000,decision:s.decision,puntaje:s.score/100,razones:s.reasons};items.push(d);items=items.slice(-30);metrics({},items.length,null);render();setStatus(true,'Vista compartida · modo de prueba');toast('Escenario calculado en este navegador; no se envió información')}else{const r=await fetch('/api/procesar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cantidad:25})});const d=await r.json();if(!r.ok)throw Error(d.error||'No se pudo procesar el lote');items.push(...d.resultados);items=items.slice(-30);metrics(d.metricas,d.procesadas_en_sesion,d.restantes);render();setStatus(true,'Sandbox conectado');toast(d.resultados.length?'Se analizaron '+d.resultados.length+' operaciones':'No hay más operaciones pendientes')}}catch(e){toast(e.message);setStatus(false,'Error de conexión')}finally{busy=false;$('runBtn').disabled=false;$('runBtn').textContent=publicMode?'Probar escenario actual  →':'Analizar 25 operaciones  →';$('runBtn').classList.remove('loading')}}
-async function reset(){if(busy)return;busy=true;$('resetBtn').disabled=true;try{if(!publicMode){const r=await fetch('/api/reset',{method:'POST'});const d=await r.json();if(!r.ok)throw Error(d.error||'No se pudo reiniciar')}items=[];$('rows').innerHTML='<tr><td class="empty" colspan="5">Simulación reiniciada. Lista para una nueva corrida.</td></tr>';$('reasons').innerHTML='<div class="reason-empty">Las razones aparecerán aquí al analizar una operación.</div>';$('countBadge').textContent='Sin analizar';metrics({},0,publicMode?null:120972);await refresh();toast('Simulación reiniciada')}catch(e){toast(e.message)}finally{busy=false;$('resetBtn').disabled=false}}
+function metrics(m={},session=sessionCount,remaining=null){
+ $('fraude').textContent=m.fraude_detectado_pct==null?'—':m.fraude_detectado_pct+'%';
+ $('fp').textContent=m.falsos_positivos_pct==null?'—':m.falsos_positivos_pct+'%';
+ $('latencia').textContent=m.latencia_ms_p50==null?'—':m.latencia_ms_p50+' ms';
+ $('total').textContent=Number(session||0).toLocaleString('es-CO');
+ $('pendientes').textContent=remaining==null?'Esperando datos del sandbox':Number(remaining).toLocaleString('es-CO')+' operaciones pendientes';
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function showReasons(d){$('reasons').innerHTML=(d?.razones||[]).map((r,i)=>'<div class="reason"><div class="reason-mark">'+(i+1)+'</div><div><b>'+esc(r)+'</b><span>Regla/señal aplicada por el motor</span></div></div>').join('')||'<div class="reason-empty">Selecciona una operación para ver los motivos.</div>'}
+function render(){
+ const body=$('rows');
+ if(!items.length){body.innerHTML='<tr><td class="empty" colspan="5">No hay operaciones analizadas todavía.</td></tr>';return}
+ body.innerHTML=items.slice().reverse().map((d,i)=>'<tr data-index="'+(items.length-1-i)+'" tabindex="0"><td><span class="txid">'+esc(d.id_transaccion)+'</span><span class="sub">'+esc(d.fecha_hora||'')+'</span></td><td>'+esc((d.tipo_operacion||'').replaceAll('_',' '))+'</td><td>'+fmtMoney(d.monto_cop)+'</td><td><span class="decision '+d.decision+'">'+esc(d.decision)+'</span></td><td><div class="risk"><span class="bar"><i style="width:'+Math.round((d.puntaje||0)*100)+'%"></i></span><small>'+Math.round((d.puntaje||0)*100)+'%</small></div></td></tr>').join('');
+ body.querySelectorAll('tr[data-index]').forEach(row=>{const pick=()=>showReasons(items[Number(row.dataset.index)]);row.addEventListener('click',pick);row.addEventListener('keydown',e=>{if(e.key==='Enter')pick()})});
+ $('countBadge').textContent=items.length+' en pantalla';showReasons(items[items.length-1]);
+}
+function hourOf(t){const m=String(t.fecha_hora||'').match(/\s(\d{2}):/);return m?Number(m[1]):0}
+function timeMs(s){const v=String(s||'').replace(' ','T');const n=Date.parse(v);return Number.isFinite(n)?n:0}
+function evaluate(t){
+ const typ=t.tipo_operacion||'',amount=Number(t.monto_cop||0),balance=Number(t.saldo_antes_cop||0);
+ const isTransfer=typ==='transferencia_inmediata',isQr=typ==='pago_qr';
+ const isWithdraw=['retiro_corresponsal','retiro_cajero'].includes(typ);
+ const isSalida=isTransfer||isQr||isWithdraw||['pago_servicios','recarga_celular','compra_tarjeta_virtual'].includes(typ);
+ const hist=historyByClient.get(t.id_cliente)||[];
+ const now=timeMs(t.fecha_hora),lastHour=hist.filter(x=>now-timeMs(x.fecha_hora)<=3600000&&now>=timeMs(x.fecha_hora)&&x.salida).length;
+ const today=String(t.fecha_hora||'').slice(0,10);
+ const daily=hist.filter(x=>String(x.fecha_hora||'').slice(0,10)===today&&x.salida).reduce((s,x)=>s+Number(x.monto_cop||0),0)+amount;
+ const rules=[],high=[];
+ const add=(id,name,severity,weight)=>{rules.push({id,name,severity});if(severity==='alta')high.push(id);score+=weight};
+ let score=0;
+ if(isTransfer&&amount>=1000000)add('R001','Transferencia inmediata ≥ $1.000.000','media',.16);
+ if(isSalida&&Number(t.dispositivo_nuevo)===1&&amount>=150000)add('R002','Salida desde dispositivo nuevo ≥ $150.000','alta',.29);
+ if(isSalida&&hourOf(t)<=4&&amount>=150000)add('R003','Operación de salida entre 00:00 y 04:59 ≥ $150.000','media',.14);
+ if(isSalida&&lastHour+1>=4)add('R004','Cuatro o más salidas del cliente en 60 minutos','media',.18);
+ if(isTransfer&&Number(t.destino_nuevo)===1&&amount>=balance*.9&&amount>=100000)add('R005','Transferencia a destino nuevo que consume ≥90% del saldo','alta',.32);
+ if(isTransfer&&Number(t.cambio_clave_24h)===1&&amount>=200000)add('R006','Transferencia tras cambio de clave en últimas 24 horas','alta',.30);
+ if(isSalida&&Number(t.cambio_sim_48h)===1&&amount>=200000)add('R007','Salida tras cambio de SIM en últimas 48 horas','alta',.34);
+ if(isWithdraw&&Number(t.antiguedad_cuenta_dias)<15&&amount>=300000)add('R008','Retiro ≥$300.000 desde cuenta con menos de 15 días','media',.20);
+ if(isSalida&&Number(t.ip_departamento_distinto)===1&&amount>=250000)add('R009','Salida ≥$250.000 desde departamento IP distinto al habitual','baja',.08);
+ if(isSalida&&daily>=1500000)add('R010','Acumulado de salidas del día ≥$1.500.000','media',.16);
+ if(isQr&&amount>=200000)add('R011','Pago QR ≥$200.000','baja',.08);
+ if(isWithdraw&&amount>=600000)add('R012','Retiro en efectivo ≥$600.000','media',.15);
+ // Historial solo incorpora operaciones ya procesadas: nunca se consulta información futura.
+ hist.push({...t,salida:isSalida});historyByClient.set(t.id_cliente,hist);
+ score=Math.min(.99,score);
+ // Ajuste por señales combinadas: evita sumar mecánicamente pesos por encima de 1.
+ if(high.length>=2)score=Math.min(.99,score+.08);
+ let decision='aprobar';
+ if(score>=.88&&high.length>=2)decision='rechazar';
+ else if(score>=.68)decision='retener';
+ else if(score>=.35)decision='desafiar';
+ const reasons=rules.map(r=>r.id+' · '+r.name);
+ if(!reasons.length)reasons.push('No se activó ninguna de las 12 reglas vigentes.');
+ return {id_transaccion:t.id_transaccion,decision,puntaje:Number(score.toFixed(4)),razones:reasons,_tx:t};
+}
+async function getJSON(path,opts={}){const r=await fetch(API+path,{...opts,cache:'no-store'});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.error||'Error HTTP '+r.status);return d}
+async function refresh(){
+ try{await getJSON('/salud');const m=await getJSON('/metricas');sessionCount=m.transacciones_decididas||0;metrics(m,sessionCount,m.transacciones_pendientes);setStatus(true,'Sandbox conectado · localhost:8080')}
+ catch(e){setStatus(false,'Sandbox desconectado');metrics({},sessionCount,null);$('pendientes').textContent='Inicia mock_api.py en este equipo';}
+}
+async function run(){
+ if(busy)return;busy=true;$('runBtn').disabled=true;$('runBtn').textContent='Analizando lote…';
+ try{
+  const batch=await getJSON('/transacciones/siguiente?cantidad=25');
+  const evaluated=(batch.transacciones||[]).map(evaluate);
+  if(evaluated.length){
+   const payload=evaluated.map(({_tx,...d})=>d);
+   await getJSON('/decisiones',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+   items.push(...evaluated.map(({_tx,...d})=>({..._tx,...d})));items=items.slice(-60);
+  }
+  const m=await getJSON('/metricas');sessionCount=m.transacciones_decididas||0;metrics(m,sessionCount,batch.restantes);render();setStatus(true,'Sandbox conectado · decisiones registradas');
+  toast(evaluated.length?'Analizadas y registradas '+evaluated.length+' operaciones':'No quedan operaciones pendientes');
+ }catch(e){setStatus(false,'Error de conexión');toast('No se pudo procesar: '+e.message)}
+ finally{busy=false;$('runBtn').disabled=false;$('runBtn').textContent='Analizar 25 operaciones  →'}
+}
+async function reset(){
+ if(busy)return;busy=true;$('resetBtn').disabled=true;
+ try{await getJSON('/reiniciar',{method:'POST'});items=[];historyByClient.clear();sessionCount=0;render();$('countBadge').textContent='Sin analizar';const m=await getJSON('/metricas');metrics(m,0,m.transacciones_pendientes);setStatus(true,'Sandbox reiniciado');toast('Sandbox reiniciado desde el inicio')}
+ catch(e){toast('No se pudo reiniciar: '+e.message)}
+ finally{busy=false;$('resetBtn').disabled=false}
+}
 function umbrales(){const t=Number($('tolerance').value);return{challenge:Math.round(60-.35*(t-1)),hold:Math.round(90-.25*(t-1))}}
-function evaluateScenario(quiet=false){const base=Number($('clientBase').value);$('clientBaseValue').textContent=base;$('clientRiskValue').textContent=base;const checks=[['away','w-away','ubicación fuera de la habitual'],['device','w-device','dispositivo nuevo'],['recipient','w-recipient','destinatario nuevo'],['sim','w-sim','cambio reciente de SIM o contraseña'],['failures','w-failures','tres o más intentos de acceso fallidos'],['amount','w-amount','monto superior al 90 % del saldo']];let points=0;const reasons=['Riesgo histórico del cliente: '+base+'/100'];for(const [check,weight,label] of checks){const input=Number($(weight).value);$(weight).value=Math.max(1,Math.min(100,input||1));if($(check).checked){points+=Number($(weight).value);reasons.push(label+' (+'+$(weight).value+')')}}const score=Math.min(100,base+points);const th=umbrales();let decision='aprobar';let action='Aprobar · seguir monitoreando';let color='#13845f';if(score>=th.hold){decision='retener';action='Retener · enviar a revisión humana';color='#c73c52'}else if(score>=th.challenge){decision='desafiar';action='Desafiar · pedir verificación adicional';color='#a56a0e'}if(!quiet){$('simScore').innerHTML=score+'<span style="font-size:13px;color:#9aa2b0;font-weight:700">/100</span>';$('simMeter').style.width=score+'%';$('simAction').textContent=action;$('simAction').style.color=color;$('simThreshold').textContent='Desafío desde '+th.challenge+' · retener desde '+th.hold+'.';$('simReasons').textContent=reasons.join(' · ')}return{score,decision,reasons}}
-$('clientBase').addEventListener('input',()=>evaluateScenario());$('tolerance').addEventListener('input',()=>{$('toleranceValue').textContent=$('tolerance').value;evaluateScenario()});document.querySelectorAll('.question input,.weight').forEach(el=>el.addEventListener('change',()=>evaluateScenario()));$('scoreBtn').addEventListener('click',()=>evaluateScenario());$('runBtn').addEventListener('click',run);$('resetBtn').addEventListener('click',reset);refresh();setInterval(refresh,12000);evaluateScenario();
+function evaluateScenario(){
+ const base=Number($('clientBase').value);$('clientBaseValue').textContent=base;$('clientRiskValue').textContent=base;
+ const checks=[['away','w-away','ubicación IP distinta'],['device','w-device','dispositivo nuevo'],['recipient','w-recipient','destino nuevo'],['sim','w-sim','cambio reciente de SIM o contraseña'],['failures','w-failures','intentos fallidos de acceso'],['amount','w-amount','monto superior al 90 % del saldo']];
+ let points=0;const reasons=['Riesgo base ilustrativo: '+base+'/100'];
+ for(const [check,weight,label] of checks){const input=Math.max(1,Math.min(100,Number($(weight).value)||1));$(weight).value=input;if($(check).checked){points+=input;reasons.push(label+' (+'+input+')')}}
+ const score=Math.min(100,base+points),th=umbrales();let decision='aprobar',action='Aprobar · continuar monitoreo',color='#13845f';
+ if(score>=th.hold){decision='retener';action='Retener · revisión humana';color='#c73c52'}else if(score>=th.challenge){decision='desafiar';action='Desafiar · verificación adicional';color='#a56a0e'}
+ $('simScore').innerHTML=score+'<span style="font-size:13px;color:#9aa2b0;font-weight:700">/100</span>';$('simMeter').style.width=score+'%';$('simAction').textContent=action;$('simAction').style.color=color;$('simThreshold').textContent='Desafío desde '+th.challenge+' · retener desde '+th.hold+'.';$('simReasons').textContent=reasons.join(' · ');return{score,decision,reasons};
+}
+$('clientBase').addEventListener('input',evaluateScenario);$('tolerance').addEventListener('input',()=>{$('toleranceValue').textContent=$('tolerance').value;evaluateScenario()});
+document.querySelectorAll('.question input,.weight').forEach(el=>el.addEventListener('change',evaluateScenario));
+$('scoreBtn').addEventListener('click',evaluateScenario);$('runBtn').addEventListener('click',run);$('resetBtn').addEventListener('click',reset);
+refresh();evaluateScenario();setInterval(refresh,12000);
 </script>
 </body>
 </html>
